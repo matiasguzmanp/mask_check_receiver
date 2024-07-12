@@ -8,6 +8,10 @@
 #include "BLEDevice.h"
 #include <Wire.h>
 
+#include <vector>
+#include <deque>
+#include <algorithm>
+#include <numeric>
 //Default Temperature is in Celsius
 //Comment the next line for Temperature in Fahrenheit
 #define temperatureCelsius
@@ -60,12 +64,172 @@ boolean newTemperature = false;
 boolean newHumidity = false;
 boolean newPressure = false;
 
+template <typename T>
+class SensorBuffer {
+public:
+    SensorBuffer(size_t size) : maxSize(size) {}
+
+    void addReading(T reading) {
+        if (buffer.size() >= maxSize) {
+            buffer.pop_front();
+        }
+        buffer.push_back(reading);
+    }
+
+    const std::deque<T>& getBuffer() const {
+        return buffer;
+    }
+    T getMean() const {
+        if (buffer.empty()) return T();
+        T sum = std::accumulate(buffer.begin(), buffer.end(), T());
+        return sum / buffer.size();
+    }
+
+    T getMax() const {
+        if (buffer.empty()) return T();
+        return *std::max_element(buffer.begin(), buffer.end());
+    }
+
+private:
+    size_t maxSize;
+    std::deque<T> buffer;
+};
+
+class SensorManager {
+public:
+    SensorManager(size_t bufferSize)
+        : tempBuffer(bufferSize), humidityBuffer(bufferSize), pressureBuffer(bufferSize),
+          pressureDerivativeBuffer(bufferSize), previousPressureReading(0.0), firstPressureReading(true) {}
+
+    void addTemperatureReading(double reading) {
+        tempBuffer.addReading(reading);
+    }
+
+    void addHumidityReading(double reading) {
+        humidityBuffer.addReading(reading);
+    }
+
+    void addPressureReading(double reading) {
+        if (firstPressureReading) {
+            previousPressureReading = reading;
+            firstPressureReading = false;
+        }
+        double pressureDerivative = reading - previousPressureReading;
+        previousPressureReading = reading;
+
+        pressureBuffer.addReading(reading);
+        pressureDerivativeBuffer.addReading(fabs(pressureDerivative));
+    }
+
+    double getTemperatureMean() const {
+        return tempBuffer.getMean();
+    }
+
+    double getTemperatureMax() const {
+        return tempBuffer.getMax();
+    }
+
+    double getHumidityMean() const {
+        return humidityBuffer.getMean();
+    }
+
+    double getHumidityMax() const {
+        return humidityBuffer.getMax();
+    }
+
+    double getPressureMean() const {
+        return pressureBuffer.getMean();
+    }
+
+    double getPressureMax() const {
+        return pressureBuffer.getMax();
+    }
+
+    double getPressureDerivativeMean() const {
+        return pressureDerivativeBuffer.getMean();
+    }
+
+    double getPressureDerivativeMax() const {
+        return pressureDerivativeBuffer.getMax();
+    }
+
+    void printBuffers() const {
+        Serial.print("Temperature buffer: ");
+        printBuffer(tempBuffer.getBuffer());
+
+        Serial.print("Humidity buffer: ");
+        printBuffer(humidityBuffer.getBuffer());
+
+        Serial.print("Pressure buffer: ");
+        printBuffer(pressureBuffer.getBuffer());
+
+        Serial.print("Pressure derivative buffer: ");
+        printBuffer(pressureDerivativeBuffer.getBuffer());
+    }
+
+    void printMeanAndMax() const {
+        Serial.print("Temp_mean: ");
+        Serial.print(getTemperatureMean());
+        Serial.print(" ");
+        Serial.print("Temp_max: ");
+        Serial.print(getTemperatureMax());
+        Serial.print(" ");
+
+        Serial.print("Hum_mean: ");
+        Serial.print(getHumidityMean());
+        Serial.print(" ");
+        Serial.print("Hum_max: ");
+        Serial.print(getHumidityMax());
+        Serial.print(" ");
+
+        Serial.print("Press_mean: ");
+        Serial.print(getPressureMean());
+        Serial.print(" ");
+        Serial.print("Press_max: ");
+        Serial.print(getPressureMax());
+        Serial.print(" ");
+
+        Serial.print("Press_dev_mean: ");
+        Serial.print(getPressureDerivativeMean());
+        Serial.print(" ");
+        Serial.print("Press_dev_max: ");
+        Serial.print(getPressureDerivativeMax());
+        Serial.println();
+    }
+
+private:
+    SensorBuffer<double> tempBuffer;
+    SensorBuffer<double> humidityBuffer;
+    SensorBuffer<double> pressureBuffer;
+    SensorBuffer<double> pressureDerivativeBuffer;
+    double previousPressureReading;
+    bool firstPressureReading;
+
+    void printBuffer(const std::deque<double>& buffer) const {
+        for (const auto& reading : buffer) {
+            Serial.print(reading);
+            Serial.print(" ");
+        }
+        Serial.println();
+    }
+};
+
+
+SensorManager sensorManager(10); // creates a sensor manager with a buffer size of 10
+
 // When the BLE Server sends a new temperature reading with the notify property
 static void temperatureNotifyCallback(BLERemoteCharacteristic* pBLERemoteCharacteristic, 
                                         uint8_t* pData, size_t length, bool isNotify) {
   // Copy temperature value
   strncpy(temperatureChar, (char*)pData, length);
   temperatureChar[length] = '\0'; // Null-terminate the string
+
+  // Convert to double
+  double temperatureValue = atof(temperatureChar);
+
+  // Add to SensorManager
+  sensorManager.addTemperatureReading(temperatureValue);
+
   newTemperature = true;
 }
 
@@ -75,6 +239,13 @@ static void humidityNotifyCallback(BLERemoteCharacteristic* pBLERemoteCharacteri
   // Copy humidity value
   strncpy(humidityChar, (char*)pData, length);
   humidityChar[length] = '\0'; // Null-terminate the string
+
+  // Convert to double
+  double humidityValue = atof(humidityChar);
+
+  // Add to SensorManager
+  sensorManager.addHumidityReading(humidityValue);
+
   newHumidity = true;
 }
 
@@ -84,6 +255,14 @@ static void pressureNotifyCallback(BLERemoteCharacteristic* pBLERemoteCharacteri
   // Copy pressure value
   strncpy(pressureChar, (char*)pData, length);
   pressureChar[length] = '\0'; // Null-terminate the string
+
+  // Convert to double
+  double pressureValue = atof(pressureChar);
+
+  // Add to SensorManager
+  sensorManager.addPressureReading(pressureValue);
+
+
   newPressure = true;
 }
 
@@ -147,6 +326,7 @@ void printReadings() {
   Serial.println(" hPa");
 }
 
+
 void setup() {
   // Start serial communication
   Serial.begin(115200);
@@ -186,7 +366,9 @@ void loop() {
     newTemperature = false;
     newHumidity = false;
     newPressure = false;
-    printReadings();
+    //sensorManager.printBuffers();
+    //printReadings();
+    sensorManager.printMeanAndMax();
   }
   delay(1000); // Delay a second between loops.
 }
