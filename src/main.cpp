@@ -97,9 +97,12 @@ private:
 
 class SensorManager {
 public:
-    SensorManager(size_t bufferSize)
+    SensorManager(size_t bufferSize, int debounceLimit)
         : tempBuffer(bufferSize), humidityBuffer(bufferSize), pressureBuffer(bufferSize),
-          pressureDerivativeBuffer(bufferSize), previousPressureReading(0.0), firstPressureReading(true) {}
+          pressureDerivativeBuffer(bufferSize), previousPressureReading(0.0), firstPressureReading(true),
+          tempFlag(false), humidityFlag(false), pressureDerivativeFlag(false),
+          tempCounter(0), humidityCounter(0), pressureDerivativeCounter(0),
+          debounceLimit(debounceLimit) {}
 
     void addTemperatureReading(double reading) {
         tempBuffer.addReading(reading);
@@ -153,6 +156,12 @@ public:
         return pressureDerivativeBuffer.getMax();
     }
 
+    void checkThresholds(double tempThreshold, double humidityThreshold, double pressureDerivativeThreshold) {
+        updateFlag(tempFlag, tempCounter, tempBuffer.getMean() > tempThreshold);
+        updateFlag(humidityFlag, humidityCounter, humidityBuffer.getMean() > humidityThreshold);
+        updateFlag(pressureDerivativeFlag, pressureDerivativeCounter, fabs(pressureDerivativeBuffer.getMax()) > pressureDerivativeThreshold);
+    }
+
     void printBuffers() const {
         Serial.print("Temperature buffer: ");
         printBuffer(tempBuffer.getBuffer());
@@ -171,31 +180,23 @@ public:
         Serial.print("Temp_mean: ");
         Serial.print(getTemperatureMean());
         Serial.print(" ");
-        Serial.print("Temp_max: ");
-        Serial.print(getTemperatureMax());
-        Serial.print(" ");
 
         Serial.print("Hum_mean: ");
         Serial.print(getHumidityMean());
-        Serial.print(" ");
-        Serial.print("Hum_max: ");
-        Serial.print(getHumidityMax());
         Serial.print(" ");
 
         Serial.print("Press_mean: ");
         Serial.print(getPressureMean());
         Serial.print(" ");
-        Serial.print("Press_max: ");
-        Serial.print(getPressureMax());
-        Serial.print(" ");
 
-        Serial.print("Press_dev_mean: ");
-        Serial.print(getPressureDerivativeMean());
-        Serial.print(" ");
         Serial.print("Press_dev_max: ");
         Serial.print(getPressureDerivativeMax());
         Serial.println();
     }
+
+    bool getTempFlag() const { return tempFlag; }
+    bool getHumidityFlag() const { return humidityFlag; }
+    bool getPressureDerivativeFlag() const { return pressureDerivativeFlag; }
 
 private:
     SensorBuffer<double> tempBuffer;
@@ -205,6 +206,15 @@ private:
     double previousPressureReading;
     bool firstPressureReading;
 
+    bool tempFlag;
+    bool humidityFlag;
+    bool pressureDerivativeFlag;
+
+    int tempCounter;
+    int humidityCounter;
+    int pressureDerivativeCounter;
+    int debounceLimit;
+
     void printBuffer(const std::deque<double>& buffer) const {
         for (const auto& reading : buffer) {
             Serial.print(reading);
@@ -212,10 +222,25 @@ private:
         }
         Serial.println();
     }
+    void updateFlag(bool& flag, int& counter, bool condition) {
+        if (condition) {
+            counter++;
+            if (counter >= debounceLimit) {
+                flag = true;
+                counter = debounceLimit; // Prevent overflow
+            }
+        } else {
+            counter--;
+            if (counter <= 0) {
+                flag = false;
+                counter = 0; // Prevent underflow
+            }
+        }
+    }
 };
 
 
-SensorManager sensorManager(10); // creates a sensor manager with a buffer size of 10
+SensorManager sensorManager(10, 3); // creates a sensor manager with a buffer size of 10
 
 // When the BLE Server sends a new temperature reading with the notify property
 static void temperatureNotifyCallback(BLERemoteCharacteristic* pBLERemoteCharacteristic, 
@@ -366,9 +391,40 @@ void loop() {
     newTemperature = false;
     newHumidity = false;
     newPressure = false;
-    //sensorManager.printBuffers();
-    //printReadings();
+
+    // Declare threshold values
+    double temperatureThreshold = 25;
+    double humidityThreshold = 70;
+    double derivativepressureThreshold = 0.8;
+
+    sensorManager.checkThresholds(temperatureThreshold, humidityThreshold, derivativepressureThreshold);
+
+    // Print temp mean, hum mean and pressure derivative max
     sensorManager.printMeanAndMax();
+
+    // Print flags
+    Serial.print("Temperature flag: ");
+    Serial.print(sensorManager.getTempFlag());
+    Serial.print(" Humidity flag: ");
+    Serial.print(sensorManager.getHumidityFlag());
+    Serial.print(" Pressure derivative flag: ");
+    Serial.print(sensorManager.getPressureDerivativeFlag());
+    Serial.println();
+
+    // We can use this flags to trigger status: USADO, NO USADO, MAL USADO
+    bool temp_flag = sensorManager.getTempFlag();
+    bool hum_flag = sensorManager.getHumidityFlag();
+    bool press_flag = sensorManager.getPressureDerivativeFlag();
+
+    if (temp_flag && hum_flag && press_flag) {
+      Serial.println("USADO");
+    } else if (temp_flag && hum_flag && !press_flag) {
+      Serial.println("MAL USADO");
+    } else {
+      Serial.println("NO USADO");
+    }
+
+
   }
   delay(1000); // Delay a second between loops.
 }
